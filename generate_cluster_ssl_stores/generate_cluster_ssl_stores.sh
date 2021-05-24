@@ -26,15 +26,18 @@ Usage: $0 [OPTIONS] <CA_CERT_CONFIG_PATH>
 Passwords for the Keystore and Truststore must be specified in the following shell environment variables.
 
 TRUSTSTORE_PASSWORD          - The password for the new Truststore.
-EXISTING_TRUSTSTORE_PASSWORD - The password of an existing Truststore when using the -t option to
-                                  populate the existing store with the new Certificate Authorities generated
-                                  for the nodes.
-
+EXISTING_TRUSTSTORE_PASSWORD - The password of an existing Truststore when using the -t option to populate the existing
+                                  store with the new Certificate Authorities generated for the nodes.
 
 Options:
  -g                             Generate passwords for each Keystore and Truststore. The passwords will be written to a
                                 .password file along with the corresponding store name. If the TRUSTSTORE_PASSWORD
                                 environment variable is set, this option will generate passwords for only each Keystore.
+
+ -c                             Set the Root Certificate Authority creation scope to be per cluster. That is each node
+                                has its own keystore, however they all contain the same Root Certificate Authority. By
+                                default it is per host. That is, by default each node has its own keystore, and its own
+                                unique Root Certificate Authority.
 
  -n=NODE_LIST                   Comma separated list of nodes defined by NODE_LIST to generate Certificate Authorities
                                 and stores for. For example:
@@ -42,38 +45,22 @@ Options:
 
                                 If unspecified, a single Keystore and Truststore will be generated.
 
- -k=KEYSTORE_SUFFIX             String defined by KEYSTORE_SUFFIX that will be used to form the Keystore name. The
-                                format of the name is <IP_ADDRESS><KEYSTORE_SUFFIX>.jks. Defaults to an empty string.
+ -p=KEYSTORE_PREFIX             String defined by KEYSTORE_PREFIX that will be used to form the Keystore name. The
+                                format of the name is <KEYSTORE_PREFIX>{IP_ADDRESS}<KEYSTORE_SUFFIX>.jks. Defaults to
+                                an empty string.
+
+ -s=KEYSTORE_SUFFIX             String defined by KEYSTORE_SUFFIX that will be used to form the Keystore name. The
+                                format of the name is <KEYSTORE_PREFIX>{IP_ADDRESS}<KEYSTORE_SUFFIX>.jks. Defaults to
+                                an empty string.
 
  -t=TRUSTSTORE_NAME             String defined by TRUSTSTORE_NAME that will be used to form the truststore name.
                                 Defaults to 'cassandra-server-truststore'. In this case final file name will be
                                     cassandra-server-truststore.jks
 
- -s=KEYSTORE_KEY_SIZE           The size of the Keystore key defined by KEYSTORE_KEY_SIZE in bits. Defaults to 2048.
+ -z=KEYSTORE_KEY_SIZE           The size of the Keystore key defined by KEYSTORE_KEY_SIZE in bits. Defaults to 2048.
 
  -v=VALID_DAYS                  Number of days defined by VALID_DAYS the Root Certificate Authority ill be valid for.
                                 Defaults to 365.
-
- -d=DISTINGUISHED_NAMES         String containing the X.500 Distinguished Names used to identify entities. When
-                                supplying a distinguished name string, it must be quoted and in the following format:
-
-                                    "CN=cName, OU=orgUnit, O=org, L=city, S=state, C=countryCode"
-
-                                Where all the italicised items represent actual values and the above keywords are
-                                abbreviations for the following:
-
-                                    CN=Common Name
-                                    OU=Organization Unit
-                                    O=Organization Name
-                                    L=Locality Name
-                                    S=State Name
-                                    C=Country
-
-                                Further details about the Distinguished Names can be found in the Java documentation:
-
-                                    https://docs.oracle.com/javase/8/docs/technotes/tools/unix/keytool.html#CHDHBFGJ
-
-                                If the Distinguished Names are undefined, you will be prompted to specify their values.
 
  -e=EXISTING_TRUSTSTORE_PATH    Path to an existing Truststore defined by PATH. If specified this Truststore will be
                                 populated with the new Certificate Authorities generated for the nodes. This is useful
@@ -89,46 +76,111 @@ EOF
     exit 2
 }
 
-generate_password() {
-  openssl rand -base64 32 | tr -d '/' | tr -d '='
+parse_config() {
+  local config_section=""
+  local distinguished_name_section=""
+
+  while IFS='= ' read -r line || [ -n "$var" ]
+  do
+    local s_line=$(tr -s ' ' <<<"$line")
+    local var=$(cut -d' ' -f1 <<<"${s_line}")
+    local val=${s_line/${var}\ /}
+
+    case "${var}" in
+      ""|"\n")
+        continue
+      ;;
+      "[")
+        config_section=${val/\ ]/}
+      ;;
+      "distinguished_name")
+        distinguished_name_section="${val/=\ /}"
+      ;;
+      "output_password")
+        ca_key_password="${val/=\ /}"
+      ;;
+      *)
+        if [ "${config_section}" = "${distinguished_name_section}" ]
+        then
+          distinguished_names+=("${var}=${val/=\ /}")
+        fi
+      ;;
+    esac
+  done < "$1"
 }
 
+generate_password() {
+  openssl rand -base64 48 | tr -d '/' | tr -d '=' | tr -d '+' | cut -c 1-32
+}
+
+generate_cn_distinguished_name_for_host() {
+  local distinguished_names_str=""
+  local distinguished_names_len=${#distinguished_names[@]}
+  local count_itr=0
+  while [ ${count_itr} -lt "${distinguished_names_len}" ]
+  do
+    local key_val=${distinguished_names[${count_itr}]}
+    local key=$(cut -d'=' -f1 <<<"${key_val}")
+    local val=${key_val/${key}=/}
+
+    if [ "${key}" = "CN" ]
+    then
+      val=$1
+    fi
+
+    if [ -z "${distinguished_names_str}" ]
+    then
+      distinguished_names_str="${key}=${val}"
+    else
+      distinguished_names_str="${distinguished_names_str}, ${key}=${val}"
+    fi
+
+    count_itr=$((count_itr + 1))
+  done
+
+  echo "${distinguished_names_str}"
+}
 
 ### Main code ###
-
 time_stamp=$(date +"%Y%m%d_%H%M%S")
 generate_passwords=false
 node_list=""
+keystore_prefix=""
 keystore_suffix=""
 truststore_name="cassandra-server-truststore"
 keystore_keysize=2048
+ca_creation_scope="host"
 ca_valid_days=365
-distinguished_names=""
+ca_key_password=""
+distinguished_names=()
 existing_truststore_path=""
 output_path="./ssl_artifacts_${time_stamp}"
 
-while getopts "gn:k:t:s:v:d:e:o:h" opt_flag; do
+while getopts "gcn:p:s:t:z:v:e:o:h" opt_flag; do
   case $opt_flag in
     g)
       generate_passwords="true"
       ;;
+    c)
+      ca_creation_scope="cluster"
+      ;;
     n)
       node_list=$OPTARG
       ;;
-    k)
+    p)
+      keystore_prefix=$OPTARG
+      ;;
+    s)
       keystore_suffix=$OPTARG
       ;;
     t)
       truststore_name=$OPTARG
       ;;
-    s)
+    z)
       keystore_keysize=$OPTARG
       ;;
     v)
       ca_valid_days=$OPTARG
-      ;;
-    d)
-      distinguished_names=$OPTARG
       ;;
     e)
       existing_truststore_path=$OPTARG
@@ -164,24 +216,30 @@ fi
 
 if [ -n "${existing_truststore_path}" ] && [ -z "${EXISTING_TRUSTSTORE_PASSWORD}" ]
 then
-  echo "Path to the existing Truststore ${existing_truststore_path} has been defined but no password set in environment variable CASSANDRA_EXISTING_TRUSTSTORE_PASSWORD"
+  echo "Path to the existing Truststore ${existing_truststore_path} has been defined but no password set in environment variable EXISTING_TRUSTSTORE_PASSWORD"
   echo ""
   usage
 fi
 
-#
+parse_config "${ca_cert_config_path}"
+
+if [ ${#distinguished_names[@]} -eq 0 ]
+then
+  cat << EOF
+No X.500 Distinguished Name found in Certificate Authority configuration file: $ca_cert_config_path. Please add them to them to the file.
+Further information about Distinguished Names can be found in the Java documentation.
+
+  https://docs.oracle.com/javase/8/docs/technotes/tools/unix/keytool.html#CHDHBFGJ
+EOF
+  exit 2
+fi
+
 # Parse node list if supplied and push values into an array.
 if [ -n "${node_list}" ]
 then
   node_array=("$(tr -s ',' ' ' <<< "${node_list}")")
 fi
 
-#
-# Use three separate stores:
-#   - The Cassandra Keystore that will contain the Cassandra private certificate.
-#   - The Generic Truststore that is will contain the Root CA used to sign the private certificates in the
-#       Cassandra and Reaper Keystores.
-#
 certs_dir="${output_path}/certs"
 stores_dir="${output_path}"
 
@@ -231,7 +289,12 @@ then
   fi
 fi
 
-ca_key_password=$(grep output_password "${ca_cert_config_path}" | sed 's/[[:space:]]//g' | cut -d'=' -f2)
+root_ca_alias="CARoot_${time_stamp}"
+ca_name="ca_${time_stamp}"
+root_ca_cert_path="${certs_dir}/${ca_name}.cert"
+ca_key_path="${certs_dir}/${ca_name}.key"
+create_new_ca_key="true"
+add_ca_to_truststore="true"
 
 for node_i in ${node_array[*]}
 do
@@ -242,25 +305,48 @@ do
 
   node_alias="${node_name}_${time_stamp}"
 
-  root_ca_alias="${node_name}_CARoot_${time_stamp}"
-  root_ca_cert="${certs_dir}/${node_name}_${time_stamp}_ca.cert"
+  # If the CA scope is per host then generate a new CA each loop
+  if [ ${ca_creation_scope} = "host" ]
+  then
+    root_ca_alias="${node_name}_CARoot_${time_stamp}"
+    root_ca_cert_path="${certs_dir}/${node_name}_${ca_name}.cert"
 
-  ca_key="${certs_dir}/${node_name}_${time_stamp}_ca.key"
+    ca_key_path="${certs_dir}/${node_name}_${ca_name}.key"
+  fi
 
-  cert_sign_req="${certs_dir}/${node_name}_${time_stamp}_cert.sr"
-  cert_signed="${certs_dir}/${node_name}_${time_stamp}_signed.cert"
+  sign_req_cert_path="${certs_dir}/${node_name}_sign_req_${time_stamp}.cert"
+  signed_cert_path="${certs_dir}/${node_name}_signed_${time_stamp}.cert"
 
-  node_keystore_path="${stores_dir}/${node_name}${keystore_suffix}.jks"
+  node_keystore_path="${stores_dir}/${keystore_prefix}${node_name}${keystore_suffix}.jks"
 
   echo
   echo "  - Root CA alias:      ${root_ca_alias}"
-  echo "  - Root CA cert path:  ${root_ca_cert}"
-  echo "  - Key CA path:        ${ca_key}"
+  echo "  - Root CA cert path:  ${root_ca_cert_path}"
+  echo "  - Key CA path:        ${ca_key_path}"
   echo "  - Keystore path:      ${node_keystore_path}"
 
   # Create the Root Certificate Authority (Root CA) from the Certificate Authority Configuration and verify contents.
-  openssl req -config "${ca_cert_config_path}" -new -x509 -keyout "${ca_key}" -out "${root_ca_cert}" -days "${ca_valid_days}"
-  openssl x509 -in "${root_ca_cert}" -text -noout
+  if [ "${create_new_ca_key}" = "true" ]
+  then
+    if [ ${ca_creation_scope} = "cluster" ]
+    then
+      cat << EOF
+
+Warning:
+Root Certificate Authority creation scope set to "cluster" level. Only one Certificate Authority will be created.
+EOF
+      create_new_ca_key="false"
+    fi
+
+    openssl req \
+      -config "${ca_cert_config_path}" \
+      -new \
+      -x509 \
+      -keyout "${ca_key_path}" \
+      -out "${root_ca_cert_path}" \
+      -days "${ca_valid_days}"
+    openssl x509 -in "${root_ca_cert_path}" -text -noout
+  fi
 
   keystore_password=""
   if [ "${generate_passwords}" = "true" ]
@@ -281,7 +367,10 @@ do
     done
   fi
 
-  echo "${node_name}${keystore_suffix}.jks:${keystore_password}" >> "${stores_password_file}"
+  echo "${keystore_prefix}${node_name}${keystore_suffix}.jks:${keystore_password}" >> "${stores_password_file}"
+
+  distinguished_names_node_str=$(generate_cn_distinguished_name_for_host "${node_alias}")
+  echo -e "Distinguished Names for node:\n ${distinguished_names_node_str}"
 
   # Generate public/private key pair and the key stores.
   keytool \
@@ -291,14 +380,15 @@ do
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}" \
+    -validity "${ca_valid_days}" \
     -keysize "${keystore_keysize}" \
-    -dname "${distinguished_names}"
+    -dname "${distinguished_names_node_str}"
 
   # Export certificates from key stores as a 'Signing Request' which the Root CA can then sign.
   keytool \
     -certreq \
     -alias "${node_alias}" \
-    -file "${cert_sign_req}" \
+    -file "${sign_req_cert_path}" \
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}"
@@ -306,10 +396,11 @@ do
   # Sign each of the certificates using the Root CA.
   openssl x509 \
     -req \
-    -CA "${root_ca_cert}" \
-    -CAkey "${ca_key}" \
-    -in "${cert_sign_req}" \
-    -out "${cert_signed}" \
+    -CA "${root_ca_cert_path}" \
+    -CAkey "${ca_key_path}" \
+    -in "${sign_req_cert_path}" \
+    -out "${signed_cert_path}" \
+    -days "${ca_valid_days}" \
     -CAcreateserial \
     -passin pass:${ca_key_password}
 
@@ -317,7 +408,7 @@ do
   keytool \
     -import \
     -alias "${root_ca_alias}" \
-    -file "${root_ca_cert}" \
+    -file "${root_ca_cert_path}" \
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}"  \
@@ -327,33 +418,43 @@ do
   keytool \
     -import \
     -alias "${node_alias}" \
-    -file "${cert_signed}" \
+    -file "${signed_cert_path}" \
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}"
 
-  # Create the truststore.
-  keytool \
-    -importcert \
-    -alias "${root_ca_alias}" \
-    -file "${root_ca_cert}" \
-    -keystore "${truststore_path}" \
-    -storepass "${truststore_password}" \
-    -keypass "${ca_key_password}" \
-    -noprompt
-
-  # Add the root certificate to an existing truststore if specified. This is useful when performing key rotation without
-  # downtime.
-  if [ -n "${existing_truststore_path}" ]
+  # Create the truststore and import the certificate. Note, if it already exists keytool will only import the certificate.
+  if [ "${add_ca_to_truststore}" = "true" ]
   then
     keytool \
       -importcert \
       -alias "${root_ca_alias}" \
-      -file "${root_ca_cert}" \
-      -keystore "${existing_truststore_path}" \
-      -storepass "${EXISTING_TRUSTSTORE_PASSWORD}" \
+      -file "${root_ca_cert_path}" \
+      -keystore "${truststore_path}" \
+      -storepass "${truststore_password}" \
       -keypass "${ca_key_password}" \
       -noprompt
+
+    # Add the root certificate to an existing truststore if specified. This is useful when performing key rotation without
+    # downtime.
+    if [ -n "${existing_truststore_path}" ]
+    then
+      keytool \
+        -importcert \
+        -alias "${root_ca_alias}" \
+        -file "${root_ca_cert_path}" \
+        -keystore "${existing_truststore_path}" \
+        -storepass "${EXISTING_TRUSTSTORE_PASSWORD}" \
+        -keypass "${ca_key_password}" \
+        -noprompt
+    fi
+
+    # Perform the keytool operations for the truststore only once if our Certificate Authority is signing all the
+    # certificates for the nodes in the cluster.
+    if [ ${ca_creation_scope} = "cluster" ]
+    then
+      add_ca_to_truststore="false"
+    fi
   fi
 done
 
