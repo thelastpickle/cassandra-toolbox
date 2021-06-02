@@ -97,7 +97,7 @@ parse_config() {
         distinguished_name_section="${val/=\ /}"
       ;;
       "output_password")
-        ca_key_password="${val/=\ /}"
+        root_ca_psk_password="${val/=\ /}"
       ;;
       *)
         if [ "${config_section}" = "${distinguished_name_section}" ]
@@ -146,12 +146,12 @@ time_stamp=$(date +"%Y%m%d_%H%M%S")
 generate_passwords=false
 node_list=""
 keystore_prefix=""
-keystore_suffix=""
-truststore_name="cassandra-server-truststore"
+keystore_suffix="-keystore"
+truststore_name="common-truststore"
 keystore_keysize=2048
-ca_creation_scope="host"
-ca_valid_days=365
-ca_key_password=""
+root_ca_creation_scope="host"
+root_ca_psk_password=""
+cert_valid_days=365
 distinguished_names=()
 existing_truststore_path=""
 output_path="./ssl_artifacts_${time_stamp}"
@@ -162,7 +162,7 @@ while getopts "gcn:p:s:t:z:v:e:o:h" opt_flag; do
       generate_passwords="true"
       ;;
     c)
-      ca_creation_scope="cluster"
+      root_ca_creation_scope="cluster"
       ;;
     n)
       node_list=$OPTARG
@@ -180,7 +180,7 @@ while getopts "gcn:p:s:t:z:v:e:o:h" opt_flag; do
       keystore_keysize=$OPTARG
       ;;
     v)
-      ca_valid_days=$OPTARG
+      cert_valid_days=$OPTARG
       ;;
     e)
       existing_truststore_path=$OPTARG
@@ -289,11 +289,15 @@ then
   fi
 fi
 
+# ca = Certificate Authority
+# pc = Public Certificate
+# psk = Private Signing Key
 root_ca_alias="CARoot_${time_stamp}"
-ca_name="ca_${time_stamp}"
-root_ca_cert_path="${certs_dir}/${ca_name}.cert"
-ca_key_path="${certs_dir}/${ca_name}.key"
-create_new_ca_key="true"
+root_ca_name="ca_${time_stamp}"
+root_ca_pc_path="${certs_dir}/${root_ca_name}.cert"
+root_ca_psk_path="${certs_dir}/${root_ca_name}.key"
+
+create_new_ca_psk="true"
 add_ca_to_truststore="true"
 
 for node_i in ${node_array[*]}
@@ -306,12 +310,11 @@ do
   node_alias="${node_name}_${time_stamp}"
 
   # If the CA scope is per host then generate a new CA each loop
-  if [ ${ca_creation_scope} = "host" ]
+  if [ "${root_ca_creation_scope}" = "host" ]
   then
     root_ca_alias="${node_name}_CARoot_${time_stamp}"
-    root_ca_cert_path="${certs_dir}/${node_name}_${ca_name}.cert"
-
-    ca_key_path="${certs_dir}/${node_name}_${ca_name}.key"
+    root_ca_pc_path="${certs_dir}/${node_name}_${root_ca_name}.cert"
+    root_ca_psk_path="${certs_dir}/${node_name}_${root_ca_name}.key"
   fi
 
   sign_req_cert_path="${certs_dir}/${node_name}_sign_req_${time_stamp}.cert"
@@ -319,33 +322,35 @@ do
 
   node_keystore_path="${stores_dir}/${keystore_prefix}${node_name}${keystore_suffix}.jks"
 
-  echo
-  echo "  - Root CA alias:      ${root_ca_alias}"
-  echo "  - Root CA cert path:  ${root_ca_cert_path}"
-  echo "  - Key CA path:        ${ca_key_path}"
-  echo "  - Keystore path:      ${node_keystore_path}"
-
+  cat << EOF
+  - Root Certificate Authority alias:                     $root_ca_alias
+  - Root Certificate Authority Public Certificate path:   $root_ca_pc_path
+  - Root Certificate Authority Private Signing Key path:  $root_ca_psk_path
+  - Keystore path:                                        $node_keystore_path
+EOF
   # Create the Root Certificate Authority (Root CA) from the Certificate Authority Configuration and verify contents.
-  if [ "${create_new_ca_key}" = "true" ]
+  if [ "${create_new_ca_psk}" = "true" ]
   then
-    if [ ${ca_creation_scope} = "cluster" ]
+    if [ "${root_ca_creation_scope}" = "cluster" ]
     then
       cat << EOF
 
 Warning:
 Root Certificate Authority creation scope set to "cluster" level. Only one Certificate Authority will be created.
+
 EOF
-      create_new_ca_key="false"
+      create_new_ca_psk="false"
     fi
 
     openssl req \
       -config "${ca_cert_config_path}" \
       -new \
       -x509 \
-      -keyout "${ca_key_path}" \
-      -out "${root_ca_cert_path}" \
-      -days "${ca_valid_days}"
-    openssl x509 -in "${root_ca_cert_path}" -text -noout
+      -keyout "${root_ca_psk_path}" \
+      -out "${root_ca_pc_path}" \
+      -days "${cert_valid_days}"
+    openssl x509 -in "${root_ca_pc_path}" -text -noout
+    echo
   fi
 
   keystore_password=""
@@ -380,7 +385,7 @@ EOF
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}" \
-    -validity "${ca_valid_days}" \
+    -validity "${cert_valid_days}" \
     -keysize "${keystore_keysize}" \
     -dname "${distinguished_names_node_str}"
 
@@ -396,19 +401,19 @@ EOF
   # Sign each of the certificates using the Root CA.
   openssl x509 \
     -req \
-    -CA "${root_ca_cert_path}" \
-    -CAkey "${ca_key_path}" \
+    -CA "${root_ca_pc_path}" \
+    -CAkey "${root_ca_psk_path}" \
     -in "${sign_req_cert_path}" \
     -out "${signed_cert_path}" \
-    -days "${ca_valid_days}" \
+    -days "${cert_valid_days}" \
     -CAcreateserial \
-    -passin pass:${ca_key_password}
+    -passin pass:${root_ca_psk_password}
 
   # Import the the Root CA into the key stores.
   keytool \
     -import \
     -alias "${root_ca_alias}" \
-    -file "${root_ca_cert_path}" \
+    -file "${root_ca_pc_path}" \
     -keystore "${node_keystore_path}" \
     -storepass "${keystore_password}" \
     -keypass "${keystore_password}"  \
@@ -429,10 +434,10 @@ EOF
     keytool \
       -importcert \
       -alias "${root_ca_alias}" \
-      -file "${root_ca_cert_path}" \
+      -file "${root_ca_pc_path}" \
       -keystore "${truststore_path}" \
       -storepass "${truststore_password}" \
-      -keypass "${ca_key_password}" \
+      -keypass "${root_ca_psk_password}" \
       -noprompt
 
     # Add the root certificate to an existing truststore if specified. This is useful when performing key rotation without
@@ -442,16 +447,16 @@ EOF
       keytool \
         -importcert \
         -alias "${root_ca_alias}" \
-        -file "${root_ca_cert_path}" \
+        -file "${root_ca_pc_path}" \
         -keystore "${existing_truststore_path}" \
         -storepass "${EXISTING_TRUSTSTORE_PASSWORD}" \
-        -keypass "${ca_key_password}" \
+        -keypass "${root_ca_psk_password}" \
         -noprompt
     fi
 
     # Perform the keytool operations for the truststore only once if our Certificate Authority is signing all the
     # certificates for the nodes in the cluster.
-    if [ ${ca_creation_scope} = "cluster" ]
+    if [ "${root_ca_creation_scope}" = "cluster" ]
     then
       add_ca_to_truststore="false"
     fi
