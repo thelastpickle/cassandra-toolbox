@@ -147,7 +147,7 @@ generate_passwords=false
 node_list=""
 keystore_prefix=""
 keystore_suffix="-keystore"
-truststore_name="common-truststore"
+truststore_name="common-truststore.jks"
 keystore_keysize=2048
 root_ca_creation_scope="host"
 root_ca_psk_password=""
@@ -253,15 +253,15 @@ echo
 echo "Using Certificate Authority configuration to generate keystores"
 cat "${ca_cert_config_path}"
 
-stores_password_file="${stores_dir}/stores.password"
-truststore_password=""
-truststore_path="${stores_dir}/${truststore_name}"
-
 # Check if we need to add an extension to the truststore name
 if [ "$(rev <<< "${truststore_name}" | cut -d'.' -f1 | rev)" != 'jks' ]
 then
-  truststore_path="${truststore_path}.jks"
+  truststore_name="${truststore_name}.jks"
 fi
+
+stores_password_file="${stores_dir}/stores.password"
+truststore_password=""
+truststore_path="${stores_dir}/${truststore_name}"
 
 if [ -n "${TRUSTSTORE_PASSWORD}" ]
 then
