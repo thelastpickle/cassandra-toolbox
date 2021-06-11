@@ -1,4 +1,4 @@
-# Cassandra Tools
+# Cassandra Toolbox
 
 A collection of tools useful for maintaining Apache Cassandra
 
