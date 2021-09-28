@@ -3,10 +3,13 @@
 This script transfers snaphots in the data directory of the local Cassandra node to the data directory of a remote
 Cassandra node via rsync. Only user defined (non-system) tables will be transferred by this script.
 
-This script will transfer the snapshot SSTable files to the parent data directory on the remote host first and in
-addition transfer a move script. The move script will check for any SSTable generation number conflicts before moving
-the files. If a conflict is found, the generation number of the transferred file is multiplied by 10 prior to being
-moved into its corresponding keyspace and table directory.
+By default, this script will transfer the snapshot SSTable files to the parent data directory on the remote host first
+and in addition transfer a move script. The move script will check for any SSTable generation number conflicts before
+moving the files. If a conflict is found, the generation number of the transferred file is multiplied by 10 prior to
+being moved into its corresponding keyspace and table directory.
+
+The default transfer behaviour can be overridden, so that rsync transfers the snapshot directly into the data directory
+of the remote host. In this mode any conflicting SSTables are overridden by the incoming snapshot.
 
 ```
 usage: copy_node_snapshot.sh [OPTIONS] <LOCAL_DATA_DIRECTORY> <SNAPSHOT_TAG> <REMOTE_USER_NAME> <REMOTE_HOST_IP> <REMOTE_HOST_DATA_DIRECTORY>
@@ -51,6 +54,10 @@ options:
                       where as the rsync option is in Kilo Bytes per Second. Hence, we will need to take the
                       stream_throughput_outbound_megabits_per_sec value, divide it by 8 and then multiply it by
                       1,000 to convert it to the value to use.
+
+-d                    Directly transfer the snapshot into the data directory of the remote host. In this mode any
+                      conflicting SSTables are overridden by the incoming snapshot. This mode is useful for remote
+                      hosts that are offline.
 
 -y                    Answer Yes to all prompts.
 
