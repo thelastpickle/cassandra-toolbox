@@ -68,8 +68,12 @@ options:
                         1,000 to convert it to the value to use.
 
   -d                    Directly transfer the snapshot into the data directory of the remote host. In this mode any
-                        conflicting SSTables are overridden by the incoming snapshot. This mode is useful for remote
+                        conflicting SSTables are overwritten by the incoming snapshot. This mode is useful for remote
                         hosts that are offline.
+
+  -o                    Overwrite any conflicting SSTables with the incoming snapshot when using the default transfer
+                        method (i.e. indirect). This option is ignored when the -d option is used, because a direct
+                        transfer will have the same behaviour for conflicting SSTables.
 
   -y                    Answer Yes to all prompts.
 
@@ -83,6 +87,7 @@ EOF
 create_remote_move_script() {
   remote_temp_path=$1
   remote_host_data_dir=$2
+  sstabe_conflict_mode=$3
 
   cat << EOF > ./${sstabel_mv_script}
 #!/bin/bash
@@ -96,7 +101,7 @@ do
   sstable_file_prefix=\$(sed -r "s/(.*)\-Data.db/\1/g" <<<"\${data_db}")
   gen_multiplier=""
 
-  if [ -f "\${remote_data_path}/\${data_db}" ]
+  if [ -f "\${remote_data_path}/\${data_db}" ] && [ "$sstabe_conflict_mode" = "preserve" ]
   then
     gen_multiplier="0"
   fi
@@ -104,7 +109,7 @@ do
   for sstable_file in \$(find $remote_temp_path -iname "\${sstable_file_prefix}-*.*" -type f)
   do
     sstable_file_src=\$(rev <<<\${sstable_file} | cut -d'/' -f1 | rev)
-    sstable_file_dst=\$(sed -r "s/([j-m][a-e])\-([0-9]*)\-/\1-\2\${gen_multiplier}-/g" <<<\${sstable_file_src})
+    sstable_file_dst=\$(sed -r "s/([j-n][a-e])\-([0-9]*)\-/\1-\2\${gen_multiplier}-/g" <<<\${sstable_file_src})
     mv -v $remote_temp_path/\${sstable_file_src} \${remote_data_path}/\${sstable_file_dst}
   done
 done
@@ -128,8 +133,9 @@ include_list=()
 bandwidth_limit=""
 skip_prompts="false"
 transfer_mode="indirect"
+sstable_conflict="preserve"
 
-while getopts "e:i:b:dyvh" opt_flag
+while getopts "e:i:b:doyvh" opt_flag
 do
   case $opt_flag in
     e)
@@ -143,6 +149,9 @@ do
     ;;
     d)
       transfer_mode="direct"
+    ;;
+    o)
+      sstable_conflict="overwrite"
     ;;
     y)
       skip_prompts="true"
@@ -190,14 +199,14 @@ do
   shift
 done
 
-echo "Using arguments"
-echo "  LOCAL_DATA_DIRECTORY:       ${local_data_dir}"
-echo "  SNAPSHOT_TAG:               ${snapshot_tag}"
-echo "  REMOTE_USER_NAME:           ${remote_user_name}"
-echo "  REMOTE_HOST_IP:             ${remote_host_ip}"
-echo "  REMOTE_HOST_DATA_DIRECTORY: ${remote_host_data_dir}"
-echo
-
+cat << EOF
+Using arguments
+  LOCAL_DATA_DIRECTORY:       $local_data_dir
+  SNAPSHOT_TAG:               $snapshot_tag
+  REMOTE_USER_NAME:           $remote_user_name
+  REMOTE_HOST_IP:             $remote_host_ip
+  REMOTE_HOST_DATA_DIRECTORY: $remote_host_data_dir
+EOF
 
 # General steps
 #
@@ -286,7 +295,7 @@ then
 
   # Create temp directory on the remote host, create remote move script, and push the move script to the remote host.
   ssh "${remote_user_name}@${remote_host_ip}" "mkdir -p ${remote_dest_path}"
-  create_remote_move_script "${remote_dest_path}" "${remote_host_data_dir}"
+  create_remote_move_script "${remote_dest_path}" "${remote_host_data_dir}" "${sstable_conflict}"
   rsync ${rsync_options} ${bandwidth_limit} ${sstabel_mv_script} ${remote_user_name}@${remote_host_ip}:${remote_host_data_dir}/
 elif [ "${transfer_mode}" = "direct" ]
 then
